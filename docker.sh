@@ -1,0 +1,1 @@
+docker run  -it  -d --name=ssh-container  -p 2223:22   -e SSH_ENABLE_PASSWORD_AUTH  -v $(pwd):/app   go_epoll
