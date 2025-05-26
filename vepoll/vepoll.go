@@ -13,7 +13,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-	"time"
 )
 
 const (
@@ -31,6 +30,7 @@ type VePoll struct {
 	cancelCtx   context.Context
 	cancelFun   context.CancelFunc
 	handler     func(message []byte) error
+	writeCh     chan []byte
 	status      int
 }
 
@@ -44,6 +44,7 @@ func NewVePoll() (*VePoll, error) {
 		connections: make(map[int32]net.Conn, 1024),
 		status:      consts.VePollStatusUnknown,
 		events:      make([]unix.EpollEvent, 100),
+		writeCh:     make(chan []byte, 1024),
 	}
 	vpl.cancelCtx, vpl.cancelFun = context.WithCancel(context.Background())
 	return vpl, nil
@@ -122,7 +123,7 @@ func (vpl *VePoll) Remove(fd int32) error {
 				return err
 			}
 			if err := f(fd); err != nil {
-				return err
+				slog.Error("VePoll Remove, err", err)
 			}
 			_ = conn.Close()
 			delete(vpl.connections, fd)
@@ -135,7 +136,7 @@ func (vpl *VePoll) Remove(fd int32) error {
 				return err
 			}
 			if err := f(fd); err != nil {
-				return err
+				slog.Error("VePoll Remove, err", err)
 			}
 			_ = conn.Close()
 			delete(vpl.webSockets, fd)
@@ -166,25 +167,61 @@ func (vpl *VePoll) runTcp() error {
 
 func (vpl *VePoll) runWebsocket() error {
 	cancelSign := vpl.cancelCtx.Done()
-	sign := make(chan struct{}, 1)
-
-	for {
-		select {
-		case <-cancelSign:
-			slog.Warn("closing vepoll")
-			return nil
-		case <-vpl.waitWebsocket(sign):
+	//read goroutine
+	go func() {
+		for {
+			err := vpl.waitWebsocket()
+			if err == syscall.EBADFD {
+				break
+			}
 		}
-	}
+	}()
+	// write goroutine
+	go func() {
+		ctx, _ := context.WithCancel(vpl.cancelCtx)
+		for {
+			select {
+			case <-ctx.Done():
+				break
+			case msg := <-vpl.writeCh:
+				err := vpl.handler(msg)
+				if err != nil {
+					slog.Info("handler message, err", err)
+				}
+			}
+		}
+	}()
+
+	<-cancelSign
+	slog.Info("closing epoll...")
+	_ = vpl.release()
+	return nil
 }
 
-func (vpl *VePoll) waitWebsocket(sign chan struct{}) <-chan struct{} {
+func (vpl *VePoll) release() error {
+	err := unix.Close(vpl.fd)
+	if err != nil {
+		slog.Error("close epoll fd, err", err)
+	}
+	vpl.mu.Lock()
+	defer vpl.mu.Unlock()
+	if vpl.mode == WebSocketMode {
+		for _, conn := range vpl.webSockets {
+			_ = conn.Close()
+		}
+	} else if vpl.mode == TcpMode {
+		for _, conn := range vpl.connections {
+			_ = conn.Close()
+		}
+	}
+	return nil
+}
+
+func (vpl *VePoll) waitWebsocket() error {
 	n, err := unix.EpollWait(vpl.fd, vpl.events, -1)
 	if err != nil {
 		slog.Error("epoll waitWebsocket", err.Error())
-		time.Sleep(3 * time.Second)
-		sign <- struct{}{}
-		return sign
+		return err
 	}
 	// 取出来的是就绪的websocket连接的fd
 	for i := 0; i < n; i++ {
@@ -201,17 +238,12 @@ func (vpl *VePoll) waitWebsocket(sign chan struct{}) <-chan struct{} {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			slog.Error("unable to read message,err", err.Error())
-			_ = conn.Close()
-			// 删除epoll事件
-			if err := unix.EpollCtl(vpl.fd, syscall.EPOLL_CTL_DEL, int(fd), nil); err != nil {
-				slog.Error("unable to remove event,err", err)
-			}
+			_ = vpl.Remove(fd)
 			continue
 		}
 		_ = vpl.handler(message)
 	}
-	sign <- struct{}{}
-	return sign
+	return nil
 }
 
 // 获取 socket 的文件描述符
