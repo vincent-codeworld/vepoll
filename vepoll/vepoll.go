@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"reflect"
 	"sync"
 	"syscall"
@@ -154,6 +155,13 @@ func (vpl *VePoll) Remove(fd int32) error {
 }
 
 func (vpl *VePoll) Run() error {
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		<-sigChan
+		signal.Stop(sigChan)
+		vpl.Stop()
+	}()
 	switch vpl.mode {
 	case TcpMode:
 		return vpl.runTcp()
