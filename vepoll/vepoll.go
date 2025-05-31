@@ -6,11 +6,12 @@ import (
 	"context"
 	"epoll/consts"
 	"fmt"
-	"github.com/hertz-contrib/websocket"
+	"github.com/gorilla/websocket"
 	"golang.org/x/sys/unix"
 	"log/slog"
 	"net"
 	"os"
+	"reflect"
 	"sync"
 	"syscall"
 )
@@ -34,14 +35,16 @@ type VePoll struct {
 	status      int
 }
 
-func NewVePoll() (*VePoll, error) {
+func NewVePoll(mode int) (*VePoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, err
 	}
 	vpl := &VePoll{
 		fd:          fd,
+		mode:        mode,
 		connections: make(map[int32]net.Conn, 1024),
+		webSockets:  make(map[int32]*websocket.Conn, 1024),
 		status:      consts.VePollStatusUnknown,
 		events:      make([]unix.EpollEvent, 100),
 		writeCh:     make(chan []byte, 1024),
@@ -49,15 +52,21 @@ func NewVePoll() (*VePoll, error) {
 	vpl.cancelCtx, vpl.cancelFun = context.WithCancel(context.Background())
 	return vpl, nil
 }
-
-func (vpl *VePoll) addConnToEpoll(file *os.File) error {
-	err := unix.EpollCtl(vpl.fd, unix.EPOLL_CTL_ADD, int(file.Fd()), &unix.EpollEvent{
+func (vpl *VePoll) GetWebSocket(fd int32) *websocket.Conn {
+	vpl.mu.RLock()
+	defer vpl.mu.RUnlock()
+	return vpl.webSockets[fd]
+}
+func (vpl *VePoll) SetHandler(handler func(message []byte) error) {
+	vpl.handler = handler
+}
+func (vpl *VePoll) addConnToEpoll(fd int) error {
+	err := unix.EpollCtl(vpl.fd, unix.EPOLL_CTL_ADD, fd, &unix.EpollEvent{
 		Events: unix.EPOLLIN | unix.EPOLLET, // 边缘触发 + 可读事件
-		Fd:     int32(file.Fd()),
+		Fd:     int32(fd),
 	})
 	if err != nil {
 		err = fmt.Errorf("calling EpollCtl err: %+v", err)
-		_ = file.Close()
 		slog.Error(err.Error())
 		return err
 	}
@@ -67,38 +76,35 @@ func (vpl *VePoll) addConnToEpoll(file *os.File) error {
 func (vpl *VePoll) AddTcpConn(conn net.Conn) error {
 	vpl.mu.Lock()
 	defer vpl.mu.Unlock()
-	file, err := socketFD(conn)
-	if err != nil {
-		slog.Error("err", err)
-		return err
-	}
-	fd := int32(file.Fd())
+	fd := getSocketFD(conn)
+	slog.Info("add fd", fd)
 	// 设置非阻塞模式
 	if err := syscall.SetNonblock(int(fd), true); err != nil {
-		_ = file.Close()
+		//_ = file.Close()
+		_ = conn.Close()
 		return fmt.Errorf("set connection non block, err: %v", err)
 	}
 
-	if err = vpl.addConnToEpoll(file); err != nil {
+	if err := vpl.addConnToEpoll(int(fd)); err != nil {
+		_ = conn.Close()
 		return err
 	}
 	vpl.connections[fd] = conn
 	return nil
 }
 
-func (vpl *VePoll) AddOuterWebSocket(conn *websocket.Conn) error {
+func (vpl *VePoll) AddOuterWebSocket(conn *websocket.Conn) (int32, error) {
 	vpl.mu.Lock()
 	defer vpl.mu.Unlock()
-	file, err := socketFD(conn.NetConn())
-	if err != nil {
-		slog.Error("err", err)
-		return err
+	fd := getSocketFD(conn.NetConn())
+	slog.Info("add fd", fd)
+	if err := vpl.addConnToEpoll(int(fd)); err != nil {
+		slog.Info("add fd err", err.Error())
+		_ = conn.Close()
+		return 0, err
 	}
-	if err = vpl.addConnToEpoll(file); err != nil {
-		return err
-	}
-	vpl.webSockets[int32(file.Fd())] = conn
-	return nil
+	vpl.webSockets[fd] = conn
+	return fd, nil
 }
 
 // 从 vepoll 移除 socket
@@ -241,13 +247,16 @@ func (vpl *VePoll) waitWebsocket() error {
 			_ = vpl.Remove(fd)
 			continue
 		}
-		_ = vpl.handler(message)
+		slog.Info("message", string(message))
+		vpl.writeCh <- message
+		//_ = vpl.handler(message)
 	}
 	return nil
 }
 
 // 获取 socket 的文件描述符
 func socketFD(conn net.Conn) (*os.File, error) {
+	//tcpConn := conn.(*route.hijackConn)
 	tcpConn := conn.(*net.TCPConn)
 	file, err := tcpConn.File()
 	if err != nil {
@@ -255,4 +264,11 @@ func socketFD(conn net.Conn) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+func getSocketFD(conn net.Conn) int32 {
+	tcpConn := reflect.Indirect(reflect.ValueOf(conn)).FieldByName("conn")
+	fdVal := tcpConn.FieldByName("fd")
+	pfdVal := reflect.Indirect(fdVal).FieldByName("pfd")
+	return int32(pfdVal.FieldByName("Sysfd").Int())
 }
