@@ -23,17 +23,18 @@ const (
 )
 
 type VePoll struct {
-	mode        int
-	mu          sync.RWMutex
-	fd          int
-	connections map[int32]net.Conn
-	webSockets  map[int32]*websocket.Conn
-	events      []unix.EpollEvent
-	cancelCtx   context.Context
-	cancelFun   context.CancelFunc
-	handler     func(message []byte) error
-	writeCh     chan []byte
-	status      int
+	mode         int
+	mu           sync.RWMutex
+	fd           int
+	connections  map[int32]net.Conn
+	webSockets   map[int32]*websocket.Conn
+	events       []unix.EpollEvent
+	cancelCtx    context.Context
+	cancelFun    context.CancelFunc
+	writeHandler func(message any) error
+	readHandler  func(message []byte) (any, bool, error)
+	writeCh      chan any
+	status       int
 }
 
 func NewVePoll(mode int) (*VePoll, error) {
@@ -48,7 +49,7 @@ func NewVePoll(mode int) (*VePoll, error) {
 		webSockets:  make(map[int32]*websocket.Conn, 1024),
 		status:      consts.VePollStatusUnknown,
 		events:      make([]unix.EpollEvent, 100),
-		writeCh:     make(chan []byte, 1024),
+		writeCh:     make(chan any, 1024),
 	}
 	vpl.cancelCtx, vpl.cancelFun = context.WithCancel(context.Background())
 	return vpl, nil
@@ -58,9 +59,13 @@ func (vpl *VePoll) GetWebSocket(fd int32) *websocket.Conn {
 	defer vpl.mu.RUnlock()
 	return vpl.webSockets[fd]
 }
-func (vpl *VePoll) SetHandler(handler func(message []byte) error) {
-	vpl.handler = handler
+func (vpl *VePoll) SetWriteHandler(handler func(message any) error) {
+	vpl.writeHandler = handler
 }
+func (vpl *VePoll) SetReadHandler(handler func(message []byte) (any, bool, error)) {
+	vpl.readHandler = handler
+}
+
 func (vpl *VePoll) addConnToEpoll(fd int) error {
 	err := unix.EpollCtl(vpl.fd, unix.EPOLL_CTL_ADD, fd, &unix.EpollEvent{
 		Events: unix.EPOLLIN | unix.EPOLLET, // 边缘触发 + 可读事件
@@ -108,7 +113,6 @@ func (vpl *VePoll) AddOuterWebSocket(conn *websocket.Conn) (int32, error) {
 	return fd, nil
 }
 
-// 从 vepoll 移除 socket
 func (vpl *VePoll) Remove(fd int32) error {
 	vpl.mu.Lock()
 	defer vpl.mu.Unlock()
@@ -180,27 +184,33 @@ func (vpl *VePoll) runTcp() error {
 }
 
 func (vpl *VePoll) runWebsocket() error {
+	ctx, _ := context.WithCancel(vpl.cancelCtx)
 	cancelSign := vpl.cancelCtx.Done()
 	//read goroutine
 	go func() {
 		for {
-			err := vpl.waitWebsocket()
-			if err == syscall.EBADFD {
+			select {
+			case <-ctx.Done():
 				break
+			default:
+				err := vpl.waitWebsocket()
+				if err == syscall.EBADFD {
+					break
+				}
 			}
+
 		}
 	}()
 	// write goroutine
 	go func() {
-		ctx, _ := context.WithCancel(vpl.cancelCtx)
 		for {
 			select {
 			case <-ctx.Done():
 				break
 			case msg := <-vpl.writeCh:
-				err := vpl.handler(msg)
+				err := vpl.writeHandler(msg)
 				if err != nil {
-					slog.Info("handler message, err", err)
+					slog.Info("writeHandler message, err", err)
 				}
 			}
 		}
@@ -255,9 +265,20 @@ func (vpl *VePoll) waitWebsocket() error {
 			_ = vpl.Remove(fd)
 			continue
 		}
+		var d any = message
+		var isWriteAble bool
+		if vpl.readHandler != nil {
+			d, isWriteAble, err = vpl.readHandler(message)
+			if err != nil {
+				slog.Error("read handler message,err", err.Error())
+				_ = vpl.Remove(fd)
+				continue
+			}
+		}
 		slog.Info("message", string(message))
-		vpl.writeCh <- message
-		//_ = vpl.handler(message)
+		if vpl.writeHandler != nil && isWriteAble {
+			vpl.writeCh <- d
+		}
 	}
 	return nil
 }

@@ -2,17 +2,27 @@ package main
 
 import (
 	"encoding/json"
+	"epoll/demo/cnsts"
 	"epoll/vepoll"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
+	"reflect"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 var webSocketMap sync.Map
+var messagePool = sync.Pool{
+	New: func() any {
+		// The buffer must be at least a block long.
+		buf := new(Message)
+		return buf
+	},
+}
 
 //var Upgrader = websocket.HertzUpgrader{
 //	ReadBufferSize:  4 * 1024, // 读缓冲区大小
@@ -57,9 +67,21 @@ func main() {
 		panic(err)
 	}
 
-	vpoll.SetHandler(func(message []byte) error {
-		msg := new(Message)
+	vpoll.SetReadHandler(func(message []byte) (any, bool, error) {
+		msg := messagePool.Get().(*Message)
 		msg.ConverMessage(message)
+		switch cnsts.MessageType(msg.MessageType) {
+		case cnsts.MessageTypeText:
+			return msg, true, nil
+			//case cnsts.MessageTypeAck:
+			//	_ = model.UpdateMessageStatus(message.MsgId, 2)
+		}
+		return nil, false, nil
+	})
+
+	vpoll.SetWriteHandler(func(message any) error {
+		msg := message.(*Message)
+		defer messagePool.Put(message)
 		fdV, ok := webSocketMap.Load(msg.ToUserId)
 		if !ok {
 			slog.Warn(fmt.Sprintf("ws,user id: %s, can not found", msg.ToUserId))
@@ -73,14 +95,17 @@ func main() {
 		}
 		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		w, _ := ws.NextWriter(websocket.TextMessage)
-		_, _ = w.Write([]byte(msg.Content))
+		//todo
+		b := ConvertString(&msg.Content)
+		_, _ = w.Write(b)
 		if err := w.Close(); err != nil {
 			slog.Error("NextWriter Close err: %+v", err)
 			return err
 		}
 		return nil
 	})
-	vpoll.Run()
+
+	_ = vpoll.Run()
 }
 
 var imHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +136,15 @@ var imHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 //	})
 //	h.Spin()
 //}
+
+func ConvertString(source *string) (b []byte) {
+	op := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	ip := (*reflect.SliceHeader)(unsafe.Pointer(source))
+	op.Data = ip.Data
+	op.Cap = ip.Len
+	op.Len = ip.Len
+	return
+}
 
 func startWebSocketServer() {
 	http.HandleFunc("/im", imHandler)
