@@ -4,9 +4,9 @@ package vepoll
 
 import (
 	"context"
-	"epoll/consts"
 	"fmt"
 	"github.com/gorilla/websocket"
+	"github.com/vincent-codeworld/vepoll/consts"
 	"golang.org/x/sys/unix"
 	"log/slog"
 	"net"

@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"epoll/demo/cnsts"
-	"epoll/vepoll"
 	"fmt"
 	"github.com/gorilla/websocket"
+	"github.com/vincent-codeworld/vepoll/demo/cnsts"
+	"github.com/vincent-codeworld/vepoll/vepoll"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
