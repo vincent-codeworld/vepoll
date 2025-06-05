@@ -19,7 +19,7 @@ func main() {
 	// 创建epoll
 	epollFd, err := unix.EpollCreate(1)
 	if err != nil {
-		log.Fatalf("unable to create epoll:%v\n", err)
+		log.Fatalf("unable to create vepoll:%v\n", err)
 	}
 
 	connections := make(map[int32]*websocket.Conn, 1000000)
@@ -63,7 +63,7 @@ func main() {
 			//n, err := unix.EpollWait(epollFd, events, 100)
 			n, err := unix.EpollWait(epollFd, events, -1)
 			if err != nil {
-				log.Println("epoll wait:", err.Error())
+				log.Println("vepoll wait:", err.Error())
 				continue
 			}
 

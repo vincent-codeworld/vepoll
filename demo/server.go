@@ -122,21 +122,6 @@ var imHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	webSocketMap.Store(userId, fd)
 })
 
-//func startWebSocketServer() {
-//	h := server.Default(
-//		server.WithHostPorts("0.0.0.0:8081"),
-//	)
-//	h.GET("/im", func(c context.Context, ctx *app.RequestContext) {
-//		userId := strings.TrimSpace(ctx.Query("user_id"))
-//		if userId == "" {
-//			ctx.SetStatusCode(http.StatusBadRequest)
-//			return
-//		}
-//		ServeIm(ctx, vpoll)
-//	})
-//	h.Spin()
-//}
-
 func ConvertString(source *string) (b []byte) {
 	op := (*reflect.SliceHeader)(unsafe.Pointer(&b))
 	ip := (*reflect.SliceHeader)(unsafe.Pointer(source))

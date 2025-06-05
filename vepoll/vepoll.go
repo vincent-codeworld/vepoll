@@ -217,7 +217,7 @@ func (vpl *VePoll) runWebsocket() error {
 	}()
 
 	<-cancelSign
-	slog.Info("closing epoll...")
+	slog.Info("closing vepoll...")
 	_ = vpl.release()
 	return nil
 }
@@ -225,7 +225,7 @@ func (vpl *VePoll) runWebsocket() error {
 func (vpl *VePoll) release() error {
 	err := unix.Close(vpl.fd)
 	if err != nil {
-		slog.Error("close epoll fd, err", err)
+		slog.Error("close vepoll fd, err", err)
 	}
 	vpl.mu.Lock()
 	defer vpl.mu.Unlock()
@@ -244,7 +244,7 @@ func (vpl *VePoll) release() error {
 func (vpl *VePoll) waitWebsocket() error {
 	n, err := unix.EpollWait(vpl.fd, vpl.events, -1)
 	if err != nil {
-		slog.Error("epoll waitWebsocket", err.Error())
+		slog.Error("vepoll waitWebsocket", err.Error())
 		return err
 	}
 	// 取出来的是就绪的websocket连接的fd
