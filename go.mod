@@ -1,6 +1,5 @@
 module github.com/vincent-codeworld/vepoll
 
-
 go 1.21
 
 require (
